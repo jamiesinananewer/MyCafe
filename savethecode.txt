@@ -1,0 +1,1150 @@
+import csv
+import re
+
+def open_files(csvfile):                            #read file into list of lists
+    with open(csvfile, 'r',newline='') as file :
+        the_list = []
+        contents = csv.reader(file)
+        
+        for item in contents :
+            
+            the_list.append(item)
+    
+    return the_list
+
+
+
+#region \\MAIN//
+#This is the main script for the application
+def main():
+    
+ 
+# # Function that read the files
+ 
+
+ 
+    leeds = open_files('leeds_09-05-2023_09-00-00.csv')
+
+    keys = ['date_time','location','customer_name','order_list','order_total','payment_method','card_number']
+
+    leeds_dict = [dict(zip(keys, row)) for row in leeds]                            #convert list of lists to list of dicts
+
+    
+
+    for row in leeds_dict:                                  #loops over all dictionaries in list
+        del row['card_number']                              #deletes card number and customer_name key-value pair
+        del row['customer_name']
+
+    test = leeds_dict[0]
+
+    og_key = 'date_time'
+    date_key = 'date'
+    time_key = 'time'
+
+
+    if og_key in test:
+        
+        value = test[og_key]
+
+        date, time = value.split(maxsplit=1)
+        
+
+        del test[og_key]
+
+        test[date_key] = date
+
+        test[time_key] = time
+    
+    
+    
+    for row in leeds_dict:
+        if og_key in row:
+            
+            value = row[og_key]
+
+            date, time = value.split(maxsplit=1)
+
+            del row[og_key]
+
+            row[date_key] = date
+
+            row[time_key] = time
+    
+
+    unique_items = []                                   #initialise item list of dictionaries
+    
+    for row in leeds_dict:
+        
+        order_list = row['order_list']
+
+        
+
+        items = [item.strip() for item in order_list.split(',')]            #split different items in order
+
+        for item in items:
+            
+            item_name, item_price = item.rsplit(' - ', 1)                   #split item name and price from item
+            item_name = item_name.strip()
+            item_price = float(item_price.strip())
+
+            new_item = {                                                    #create item dictionary
+                    'item_name' : item_name,
+                    'item_price' : item_price
+                }
+            
+
+            if new_item not in unique_items:                                #add item to list of dictionaries if not already there
+                
+
+                unique_items.append(new_item)
+
+        
+    for index, item in enumerate(unique_items):                             #give items in list unique id
+
+        item['item_id'] = index + 1            
+    
+    
+    for order in leeds_dict:                                           #loop over items and orders
+        
+        order_id_list = []
+        
+        for item in unique_items:
+            
+            price_len = len(str(item['item_price']))
+
+            match price_len:                                            #create reference to see if item is in order
+                    case 3:
+                        ref_string = item['item_name'] + ' - ' + str(item['item_price']) + '0'      #if 1d.p., add 0 to price
+                    case 4:
+                        ref_string = item['item_name'] + ' - ' + str(item['item_price'])            #if 2d.p, don't add 0 to price
+                    case _:
+                        print("ERROR IN price_len")
+            
+
+            order_list = order['order_list']
+                        
+            
+            if ref_string in order_list.split(', '):                     #create list of item ids corresponding to items in order
+                
+                order_id_list.append(item['item_id'])
+                
+                
+
+            order['item_ids'] = order_id_list                          #add key-value pair to orders with item ids
+
+        del order['order_list']                                         #remove original order list
+
+
+    
+
+
+    
+    
+    
+    print("this is the main function")
+#endregion //MAIN\\
+
+main()
+
+
+
+
+
+
+
+
+def lambda_handler(event, context):
+    
+    client = boto3.client('s3')
+    
+    
+    #bucket = event['Records'][0]['s3']['bucket']['name']
+    
+    bucket = 'livin-bucket'
+    
+    filename = event['Records'][0]['s3']['object']['key']
+    
+    response = client.get_object(Bucket = bucket, Key = filename)
+    
+    csv_content = response['Body'].read().decode('utf-8').splitlines()
+    
+    raw_data = extract_data(csv_content)
+    
+    orders, products, junction_data = transform_data(raw_data)
+    
+    print(orders)
+    
+    print(products)
+    
+    print(junction_data)
+    
+    return {
+        'statusCode' : 200,
+        'body' : {
+            'orders' : orders,
+            'products' : products,
+            'junction_data' : junction_data
+        }
+    }
+    
+
+
+
+import csv
+import boto3
+import psycopg2 as psy
+import logging
+from io import StringIO
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+bucket_name = 'livin-bucket'
+object_key = 'order_numbers/order_number.txt'
+region_name = 'eu-west-1'
+
+def read_order_number(bucket_name, object_key, region_name='eu-west-1'):
+    """
+    Reads the order number from an S3 bucket.
+
+    :param bucket_name: Name of the S3 bucket.
+    :param object_key: Key (filename) to read the order number from.
+    :param region_name: AWS region name.
+    :return: The order number read from the S3 bucket.
+    """
+    s3 = boto3.client('s3', region_name=region_name)
+    response = s3.get_object(Bucket=bucket_name, Key=object_key)
+    order_number = int(response['Body'].read().decode('utf-8'))
+    return order_number
+
+def write_order_number(bucket_name, object_key, order_number, region_name='eu-west-1'):
+    """
+    Writes the order number to an S3 bucket.
+
+    :param bucket_name: Name of the S3 bucket.
+    :param object_key: Key (filename) to store the order number as.
+    :param order_number: Order number to store.
+    :param region_name: AWS region name.
+    """
+    s3 = boto3.client('s3', region_name=region_name)
+    s3.put_object(Bucket=bucket_name, Key=object_key, Body=str(order_number).encode('utf-8'))
+    print(f"Successfully stored order number {order_number} in {bucket_name}/{object_key}")
+
+
+def extract_data(csv_content):
+    try:
+        csv_list = []
+        contents = csv.reader(csv_content)
+        for item in contents:
+            csv_list.append(item)
+        keys = ['date_time', 'location', 'customer_name', 'order_list', 'order_total', 'payment_method', 'card_number']
+        list_of_dicts = [dict(zip(keys, row)) for row in csv_list]
+        return list_of_dicts
+    except Exception as e:
+        logger.error(f"Error extracting data: {str(e)}")
+        raise e
+
+def transform_data(list_of_dicts):
+    try:
+        for row in list_of_dicts:
+            del row['card_number']
+            del row['customer_name']
+        
+        og_key = 'date_time'
+        date_key = 'date'
+        time_key = 'time'
+
+        for row in list_of_dicts:
+            if og_key in row:
+                value = row[og_key]
+                date, time = value.split(maxsplit=1)
+                del row[og_key]
+                row[date_key] = date
+                row[time_key] = time
+
+        products = []
+        for row in list_of_dicts:
+            order_list = row['order_list']
+            items = [item.strip() for item in order_list.split(',')]
+            for item in items:
+                item_name, item_price = item.rsplit(' - ', 1)
+                item_name = item_name.strip()
+                item_price = float(item_price.strip())
+                new_item = {'item_name': item_name, 'item_price': item_price}
+                if new_item not in products:
+                    products.append(new_item)
+
+        for index, item in enumerate(products):
+            item['item_id'] = index + 1
+
+        for order in list_of_dicts:
+            order_id_list = []
+            for item in products:
+                price_len = len(str(item['item_price']))
+                if price_len == 3:
+                    ref_string = f"{item['item_name']} - {item['item_price']}0"
+                elif price_len == 4:
+                    ref_string = f"{item['item_name']} - {item['item_price']}"
+                else:
+                    logger.error("ERROR IN price_len")
+                order_list = order['order_list']
+                if ref_string in order_list.split(', '):
+                    order_id_list.append(item['item_id'])
+                order['item_ids'] = order_id_list
+            del order['order_list']
+        
+        # Read the current order number from S3
+        order_number = read_order_number(bucket_name, object_key, region_name)
+        
+        for index, order in enumerate(list_of_dicts):
+            order['order_id'] = index + 1 + order_number
+        
+        final_order_number = list_of_dicts[-1]['order_id']    
+        
+        # Writes the current order number to S3 bucket
+        write_order_number(bucket_name, object_key, final_order_number, region_name='eu-west-1')
+
+        junction_data = []
+        for order in list_of_dicts:
+            ord_id = order['order_id']
+            item_order_ids = order['item_ids']
+            for item_num in item_order_ids:
+                junction_data.append((ord_id, item_num))
+
+        return list_of_dicts, products, junction_data
+    except Exception as e:
+        logger.error(f"Error transforming data: {str(e)}")
+        raise e
+
+def lambda_handler(event, context):
+    try:
+        client = boto3.client('s3')
+        bucket = event['Records'][0]['s3']['bucket']['name']
+        filename = event['Records'][0]['s3']['object']['key']
+        response = client.get_object(Bucket=bucket, Key=filename)
+        csv_content = response['Body'].read().decode('utf-8').splitlines()
+        raw_data = extract_data(csv_content)
+        orders, products, junction_data = transform_data(raw_data)
+
+        connection = psy.connect(
+            dbname='livin_la_vida_mocha_cafe_db',
+            user='livin_la_vida_mocha_user',
+            password='NVvRTLWrWtan7',
+            host='redshiftcluster-2mdz2z5k6u5l.cevjfhhfzr6y.eu-west-1.redshift.amazonaws.com',
+            port=5439
+        )
+        cursor = connection.cursor()
+
+        create_orders = '''
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id INT PRIMARY KEY,
+            order_location VARCHAR(255) NOT NULL,
+            order_total FLOAT NOT NULL,
+            order_payment_method VARCHAR(255) NOT NULL,
+            order_date VARCHAR(255) NOT NULL,
+            order_time VARCHAR(255) NOT NULL
+        )
+        '''
+        create_items = '''
+        CREATE TABLE IF NOT EXISTS items (
+            item_id INT PRIMARY KEY,
+            item_name VARCHAR(255) NOT NULL,
+            item_price FLOAT NOT NULL
+        )
+        '''
+        create_junction = '''
+        CREATE TABLE IF NOT EXISTS order_item_junction (
+            order_id INT,
+            item_id INT,
+            PRIMARY KEY (order_id, item_id)
+        )
+        '''
+        cursor.execute(create_orders)
+        cursor.execute(create_items)
+        cursor.execute(create_junction)
+        
+        #connection.commit()
+        
+        order_fill = '''
+        INSERT INTO orders (order_id, order_location, order_total, order_payment_method, order_date, order_time)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        '''
+        for order in orders:
+            order_data = (order['order_id'], order['location'], order['order_total'], order['payment_method'], order['date'], order['time'])
+            cursor.execute(order_fill, order_data)
+
+        item_fill = '''
+        INSERT INTO items (item_id, item_name, item_price)
+        VALUES (%s, %s, %s)
+        '''
+        for item in products:
+            item_data = (item['item_id'], item['item_name'], item['item_price'])
+            cursor.execute(item_fill, item_data)
+
+        junction_fill = '''
+        INSERT INTO order_item_junction (order_id, item_id)
+        VALUES (%s, %s)
+        '''
+        for junc in junction_data:
+            cursor.execute(junction_fill, junc)
+
+        connection.commit()
+        cursor.close()
+        connection.close()
+        
+        logger.info("Data inserted successfully into Redshift")
+
+        return {
+            'statusCode': 200,
+            'body': {
+                'orders': orders,
+                'products': products,
+                'junction_data': junction_data
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error in lambda_handler: {str(e)}")
+        raise e
+
+
+
+
+
+
+import csv
+import boto3
+import psycopg2 as psy
+import logging
+from io import StringIO
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+bucket_name = 'livin-bucket'
+object_key = 'order_numbers/order_number.txt'
+region_name = 'eu-west-1'
+
+def read_order_number(bucket_name, object_key, region_name='eu-west-1'):
+    """
+    Reads the order number from an S3 bucket.
+
+    :param bucket_name: Name of the S3 bucket.
+    :param object_key: Key (filename) to read the order number from.
+    :param region_name: AWS region name.
+    :return: The order number read from the S3 bucket.
+    """
+    s3 = boto3.client('s3', region_name=region_name)
+    response = s3.get_object(Bucket=bucket_name, Key=object_key)
+    order_number = int(response['Body'].read().decode('utf-8'))
+    return order_number
+
+def write_order_number(bucket_name, object_key, order_number, region_name='eu-west-1'):
+    """
+    Writes the order number to an S3 bucket.
+
+    :param bucket_name: Name of the S3 bucket.
+    :param object_key: Key (filename) to store the order number as.
+    :param order_number: Order number to store.
+    :param region_name: AWS region name.
+    """
+    s3 = boto3.client('s3', region_name=region_name)
+    s3.put_object(Bucket=bucket_name, Key=object_key, Body=str(order_number).encode('utf-8'))
+    print(f"Successfully stored order number {order_number} in {bucket_name}/{object_key}")
+
+
+def extract_data(csv_content):
+    try:
+        csv_list = []
+        contents = csv.reader(csv_content)
+        for item in contents:
+            csv_list.append(item)
+        keys = ['date_time', 'location', 'customer_name', 'order_list', 'order_total', 'payment_method', 'card_number']
+        list_of_dicts = [dict(zip(keys, row)) for row in csv_list]
+        return list_of_dicts
+    except Exception as e:
+        logger.error(f"Error extracting data: {str(e)}")
+        raise e
+
+def transform_data(list_of_dicts):
+    #cursor = connection.cursor()
+    
+    #cursor.execute('SELECT * FROM items')
+    #item_db_rows = cursor.fetchall()
+    #item_db_cols = [desc[0] for desc in cursor.description]
+    
+    #db_items = []
+    #for row in item_db_rows:
+    #   row_dict = dict(zip(item_db_cols, row))
+    #   db_items.append(row_dict)
+    
+    try:
+        for row in list_of_dicts:
+            del row['card_number']
+            del row['customer_name']
+        
+        og_key = 'date_time'
+        date_key = 'date'
+        time_key = 'time'
+
+        for row in list_of_dicts:
+            if og_key in row:
+                value = row[og_key]
+                date, time = value.split(maxsplit=1)
+                del row[og_key]
+                row[date_key] = date
+                row[time_key] = time
+
+        products = []
+        for row in list_of_dicts:
+            order_list = row['order_list']
+            items = [item.strip() for item in order_list.split(',')]
+            for item in items:
+                item_name, item_price = item.rsplit(' - ', 1)
+                item_name = item_name.strip()
+                item_price = float(item_price.strip())
+                new_item = {'item_name': item_name, 'item_price': item_price}
+                if new_item not in products:
+                    products.append(new_item)
+                
+                
+                # for product in products:
+                #     prod_name = product['item_name']
+                #     if prod_name not in db_items:
+                #       db_items.append(product)
+                #       db_items[-1]['item_id'] = len(db_items)
+                #         
+                #DELAY??
+                
+        for index, item in enumerate(products):     #GET RID OF?
+            item['item_id'] = index + 1
+        
+        #cursor.execute('SELECT * FROM items')
+        #item_db_rows = cursor.fetchall()
+        #item_db_cols = [desc[0] for desc in cursor.description]
+        
+        #db_items = []
+        #for row in item_db_rows:
+        #   row_dict = dict(zip(item_db_cols, row))
+        #   db_items.append(row_dict)
+        
+        #REPLACING ITEM NAMES WITH IDS
+        for order in list_of_dicts:
+            order_id_list = []
+            for item in db_items:
+                price_len = len(str(item['item_price']))
+                if price_len == 3:
+                    ref_string = f"{item['item_name']} - {item['item_price']}0"
+                elif price_len == 4:
+                    ref_string = f"{item['item_name']} - {item['item_price']}"
+                else:
+                    logger.error("ERROR IN price_len")
+                order_list = order['order_list']
+                if ref_string in order_list.split(', '):
+                    order_id_list.append(item['item_id'])
+                order['item_ids'] = order_id_list
+            
+            #QUERY DB TO FIND 
+            
+            
+            del order['order_list']
+        
+        # Read the current order number from S3
+        order_number = read_order_number(bucket_name, object_key, region_name)
+        
+        for index, order in enumerate(list_of_dicts):
+            order['order_id'] = index + 1 + order_number
+        
+        final_order_number = list_of_dicts[-1]['order_id']    
+        
+        # Writes the current order number to S3 bucket
+        write_order_number(bucket_name, object_key, final_order_number, region_name='eu-west-1')
+
+        junction_data = []
+        for order in list_of_dicts:
+            ord_id = order['order_id']
+            item_order_ids = order['item_ids']
+            for item_num in item_order_ids:
+                junction_data.append((ord_id, item_num))
+
+        return list_of_dicts, db_items, junction_data
+    
+    except Exception as e:
+        logger.error(f"Error transforming data: {str(e)}")
+        raise e
+
+import csv
+import boto3
+import psycopg2 as psy
+import logging
+from io import StringIO
+
+connection = psy.connect(
+            dbname='livin_la_vida_mocha_cafe_db',
+            user='livin_la_vida_mocha_user',
+            password='NVvRTLWrWtan7',
+            host='redshiftcluster-2mdz2z5k6u5l.cevjfhhfzr6y.eu-west-1.redshift.amazonaws.com',
+            port=5439
+        )
+
+
+
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+bucket_name = 'livin-bucket'
+object_key = 'order_numbers/order_number.txt'
+region_name = 'eu-west-1'
+
+def read_order_number(bucket_name, object_key, region_name='eu-west-1'):
+    """
+    Reads the order number from an S3 bucket.
+
+    :param bucket_name: Name of the S3 bucket.
+    :param object_key: Key (filename) to read the order number from.
+    :param region_name: AWS region name.
+    :return: The order number read from the S3 bucket.
+    """
+    s3 = boto3.client('s3', region_name=region_name)
+    response = s3.get_object(Bucket=bucket_name, Key=object_key)
+    order_number = int(response['Body'].read().decode('utf-8'))
+    return order_number
+
+def write_order_number(bucket_name, object_key, order_number, region_name='eu-west-1'):
+    """
+    Writes the order number to an S3 bucket.
+
+    :param bucket_name: Name of the S3 bucket.
+    :param object_key: Key (filename) to store the order number as.
+    :param order_number: Order number to store.
+    :param region_name: AWS region name.
+    """
+    s3 = boto3.client('s3', region_name=region_name)
+    s3.put_object(Bucket=bucket_name, Key=object_key, Body=str(order_number).encode('utf-8'))
+    print(f"Successfully stored order number {order_number} in {bucket_name}/{object_key}")
+
+
+def extract_data(csv_content):
+    try:
+        csv_list = []
+        contents = csv.reader(csv_content)
+        for item in contents:
+            csv_list.append(item)
+        keys = ['date_time', 'location', 'customer_name', 'order_list', 'order_total', 'payment_method', 'card_number']
+        list_of_dicts = [dict(zip(keys, row)) for row in csv_list]
+        return list_of_dicts
+    except Exception as e:
+        logger.error(f"Error extracting data: {str(e)}")
+        raise e
+
+def transform_data(list_of_dicts):
+    cursor = connection.cursor()
+    
+    cursor.execute('SELECT * FROM items')
+    item_db_rows = cursor.fetchall()
+    item_db_cols = [desc[0] for desc in cursor.description]
+    
+    db_items = []
+    for row in item_db_rows:
+      row_dict = dict(zip(item_db_cols, row))
+      db_items.append(row_dict)
+    
+    try:
+        for row in list_of_dicts:
+            del row['card_number']
+            del row['customer_name']
+        
+        
+
+        products = []
+        for row in list_of_dicts:
+            order_list = row['order_list']
+            items = [item.strip() for item in order_list.split(',')]
+            for item in items:
+                item_name, item_price = item.rsplit(' - ', 1)
+                item_name = item_name.strip()
+                item_price = float(item_price.strip())
+                new_item = {'item_name': item_name, 'item_price': item_price}
+                if new_item not in products:
+                    products.append(new_item)
+                
+                
+                for product in products:
+                    prod_name = product['item_name']
+                    if prod_name not in db_items:
+                      db_items.append(product)
+                      db_items[-1]['item_id'] = len(db_items)
+                        
+                #DELAY??
+                
+        
+        
+        
+        
+        #REPLACING ITEM NAMES WITH IDS
+        for order in list_of_dicts:
+            order_id_list = []
+            for item in db_items:
+                price_len = len(str(item['item_price']))
+                if price_len == 3:
+                    ref_string = f"{item['item_name']} - {item['item_price']}0"
+                elif price_len == 4:
+                    ref_string = f"{item['item_name']} - {item['item_price']}"
+                else:
+                    logger.error("ERROR IN price_len")
+                order_list = order['order_list']
+                if ref_string in order_list.split(', '):
+                    order_id_list.append(item['item_id'])
+                order['item_ids'] = order_id_list
+            
+            #QUERY DB TO FIND 
+            
+            
+            del order['order_list']
+        
+        # # Read the current order number from S3
+        # order_number = read_order_number(bucket_name, object_key, region_name)
+        
+        # for index, order in enumerate(list_of_dicts):
+        #     order['order_id'] = index + 1 + order_number
+        
+        # final_order_number = list_of_dicts[-1]['order_id']    
+        
+        # # Writes the current order number to S3 bucket
+        # write_order_number(bucket_name, object_key, final_order_number, region_name='eu-west-1')
+
+        junction_data = []
+        for order in list_of_dicts:
+            ord_id = order['order_id']
+            item_order_ids = order['item_ids']
+            for item_num in item_order_ids:
+                junction_data.append((ord_id, item_num))
+
+        return list_of_dicts, db_items, junction_data
+    
+    except Exception as e:
+        logger.error(f"Error transforming data: {str(e)}")
+        raise e
+
+def create_junction(orders, recent_order_length):
+    
+    cursor = connection.cursor()
+    
+    cursor.execute('SELECT * FROM orders ORDER BY order_id DESC')
+    
+    order_db_rows = cursor.fetchmany(recent_order_length)
+    order_db_cols = desc[0] for desc in cursor.description()
+    
+    db_orders = []
+    for row in order_db_rows:
+        row_dict = dict(zip(order_db_cols, row))
+        db_orders.append(row_dict)
+    
+    for i, order, in enumerate(orders):
+        for j, db_order in enumerate(db_orders):
+            db_orders[j]['item_ids'] = orders[-(i+1)]['item_ids']
+    
+        
+    junction_data = []
+        for order in db_orders:
+            ord_id = order['order_id']
+            item_order_ids = order['item_ids']
+            for item_num in item_order_ids:
+                junction_data.append((ord_id, item_num))
+                
+    return junction_data
+    
+    
+    
+
+def lambda_handler(event, context):
+    try:
+        cursor = connection.cursor()
+
+        create_orders = '''
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id INTEGER IDENTITY(1,1) PRIMARY KEY,
+            order_location VARCHAR(255) NOT NULL,
+            order_total FLOAT NOT NULL,
+            order_payment_method VARCHAR(255) NOT NULL,
+            order_date_time VARCHAR(255) NOT NULL
+        )
+        '''
+        
+        create_items = '''
+        CREATE TABLE IF NOT EXISTS items (
+            item_id INTEGER IDENTITY(1,1) PRIMARY KEY,
+            item_name VARCHAR(255) NOT NULL,
+            item_price FLOAT NOT NULL
+        )
+        '''
+        
+        create_junction = '''
+        CREATE TABLE IF NOT EXISTS order_item_junction (
+            order_id INT,
+            item_id INT,
+            PRIMARY KEY (order_id, item_id)
+        )
+        '''
+        cursor.execute(create_orders)
+        cursor.execute(create_items)
+        cursor.execute(create_junction)
+        
+        # Iterate over each SQS message
+        for record in event['Records']:
+            # Extract the S3 event notification from the SQS message
+            sqs_body = json.loads(record['body'])
+            s3_event = sqs_body['Records'][0]['s3']
+
+            bucket = s3_event['bucket']['name']
+            filename = s3_event['object']['key']
+            
+            client = boto3.client('s3')
+            response = client.get_object(Bucket=bucket, Key=filename)
+            
+            csv_content = response['Body'].read().decode('utf-8').splitlines()
+            
+            raw_data = extract_data(csv_content)
+            
+            orders, products = transform_data(raw_data)
+            
+            order_fill = '''
+            INSERT INTO orders (order_location, order_total, order_payment_method, order_date_time)
+            VALUES (%s, %s, %s, %s)
+            '''
+            
+            for order in orders:
+                order_data = (order['location'], order['order_total'], order['payment_method'], order['date_time'])
+                cursor.execute(order_fill, order_data)
+
+            item_fill = '''
+            INSERT INTO items (item_name, item_price)
+            VALUES (%s, %s)
+            '''
+            for item in products:
+                item_data = (item['item_name'], item['item_price'])
+                cursor.execute(item_fill, item_data)
+            
+            recent_order_length = len(orders)
+            
+            junction_data = create_junction(orders, recent_order_length)
+            
+            
+            junction_fill = '''
+            INSERT INTO order_item_junction (order_id, item_id)
+            VALUES (%s, %s)
+            '''
+            for junc in junction_data:
+                cursor.execute(junction_fill, junc)
+
+        connection.commit()
+        cursor.close()
+        connection.close()
+        
+        logger.info("Data inserted successfully into Redshift")
+
+        return {
+            'statusCode': 200,
+            'body': {
+                'orders': orders,
+                'products': products,
+                'junction_data': junction_data
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error in lambda_handler: {str(e)}")
+        raise e
+
+
+
+import csv
+import boto3
+import psycopg2 as psy
+import logging
+from io import StringIO
+import json
+
+connection = psy.connect(
+    dbname='livin_la_vida_mocha_cafe_db',
+    user='livin_la_vida_mocha_user',
+    password='NVvRTLWrWtan7',
+    host='redshiftcluster-2mdz2z5k6u5l.cevjfhhfzr6y.eu-west-1.redshift.amazonaws.com',
+    port=5439
+)
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+bucket_name = 'livin-bucket'
+object_key = 'order_numbers/order_number.txt'
+region_name = 'eu-west-1'
+
+def read_order_number(bucket_name, object_key, region_name='eu-west-1'):
+    s3 = boto3.client('s3', region_name=region_name)
+    response = s3.get_object(Bucket=bucket_name, Key=object_key)
+    order_number = int(response['Body'].read().decode('utf-8'))
+    return order_number
+
+def write_order_number(bucket_name, object_key, order_number, region_name='eu-west-1'):
+    s3 = boto3.client('s3', region_name=region_name)
+    s3.put_object(Bucket=bucket_name, Key=object_key, Body=str(order_number).encode('utf-8'))
+    print(f"Successfully stored order number {order_number} in {bucket_name}/{object_key}")
+
+def extract_data(csv_content):
+    try:
+        csv_list = []
+        contents = csv.reader(csv_content)
+        for item in contents:
+            csv_list.append(item)
+        keys = ['date_time', 'location', 'customer_name', 'order_list', 'order_total', 'payment_method', 'card_number']
+        list_of_dicts = [dict(zip(keys, row)) for row in csv_list]
+        return list_of_dicts
+    except Exception as e:
+        logger.error(f"Error extracting data: {str(e)}")
+        raise e
+
+def transform_data(list_of_dicts):
+    cursor = connection.cursor()
+    
+    logger.info(f"LINE 50 - INSIDE TRANSFORM_DATA") #DELTEL THIS IF WORKING - NICK
+    
+    cursor.execute('SELECT * FROM items')
+    item_db_rows = cursor.fetchall()
+    item_db_cols = [desc[0] for desc in cursor.description]
+    logger.info(f"LINE 55 - INSIDE TRANSFORM_DATA: item_db_rows {item_db_rows}") #DELTEL THIS IF WORKING - NICK
+    db_items = []
+    
+    for row in item_db_rows:
+        row_dict = dict(zip(item_db_cols, row))
+        db_items.append(row_dict)
+    
+    db_items_only = [db_item['item_name'] for db_item in db_items]
+    
+    logger.info(f"LINE 60 - INSIDE TRANSFORM_DATA") #DELTEL THIS IF WORKING - NICK
+    new_items = []
+    try:
+        for row in list_of_dicts:
+            del row['card_number']
+            del row['customer_name']
+        
+        products = []
+        # CARLOS - Need to create the new_items variable: new_items=[]    
+        
+        for row in list_of_dicts:
+            order_list = row['order_list']
+            items = [item.strip() for item in order_list.split(',')]
+            for item in items:
+                item_name, item_price = item.rsplit(' - ', 1)
+                item_name = item_name.strip()
+                item_price = float(item_price.strip())
+                new_item = {'item_name': item_name, 'item_price': item_price}
+                if new_item not in products:
+                    products.append(new_item)
+             
+            for product in products:
+                prod_name = product['item_name']
+                logger.info(f"LINE 80, prod_name: {prod_name} ...IXI... PRODUCT:  {product}") #DELTEL THIS IF WORKING - NICK
+                    
+                if prod_name not in db_items_only:
+                    logger.info(f"PROD_NAME NOT IN DB_ITEMS: PROD_NAME = {prod_name} . APPENDING TO DB_ITEMS") #DELTEL THIS IF WORKING - NICK
+                    db_items_len_logger = len(db_items) #DELTEL THIS IF WORKING - NICK
+                    logger.info(f"len(db_items): {db_items_len_logger}") #DELTEL THIS IF WORKING - NICK
+                    
+                    
+                    new_items.append(product)
+                    # CARLOS - I think you need also to add the product to db_items, because is the one you use for check the id of the item later: db_items.append(product)
+                 
+                
+                    db_items[-1]['item_id'] = len(db_items)
+                    logger_check_1 = db_items[-1]['item_id'] #DELTEL THIS IF WORKING - NICK
+                    
+                    logger.info(f"LINE 88-ish: db_items[-1]['item_id'] = {logger_check_1} .... DB_ITEM LENNGTH BEFORE APEND = {db_items_len_logger}") #DELTEL THIS IF WORKING - NICK
+            
+        logger.info(f"LINE 89-ish, PRODUCTS: {products}") #DELTEL THIS IF WORKING - NICK
+        logger.info(f"LINE 90-ish, DB_ITEMS: {db_items}") #DELTEL THIS IF WORKING - NICK
+        logger.info(f"LINE 91-ish, ITEMS: {items}") #DELTEL THIS IF WORKING - NICK
+        
+        for order in list_of_dicts:
+            order_id_list = []
+            for item in db_items:
+                price_len = len(str(item['item_price']))
+                if price_len == 3:
+                    ref_string = f"{item['item_name']} - {item['item_price']}0"
+                elif price_len == 4:
+                    ref_string = f"{item['item_name']} - {item['item_price']}"
+                else:
+                    logger.error("ERROR IN price_len")
+                order_list = order['order_list']
+                if ref_string in order_list.split(', '):
+                    order_id_list.append(item['item_id'])
+                order['item_ids'] = order_id_list
+            
+            del order['order_list']
+        logger.info(f"LINE 101, ORDER ID LIST: {order_id_list}") #DELETE THIS IF WORKING - Nick
+        # junction_data = []
+        # for order in list_of_dicts:
+        #     ord_id = order['order_id']
+        #     item_order_ids = order['item_ids']
+        #     for item_num in item_order_ids:
+        #         junction_data.append((ord_id, item_num))
+
+        return list_of_dicts, new_items
+    
+    except Exception as e:
+        logger.error(f"Error transforming data: {str(e)}")
+        raise e
+
+def create_junction(orders, recent_order_length):
+    cursor = connection.cursor()
+    cursor.execute('SELECT * FROM orders ORDER BY order_id DESC')
+    order_db_rows = cursor.fetchmany(recent_order_length)
+    order_db_cols = [desc[0] for desc in cursor.description()]
+    
+    db_orders = []
+    for row in order_db_rows:
+        row_dict = dict(zip(order_db_cols, row))
+        db_orders.append(row_dict)
+    
+    for i, order in enumerate(orders):
+        for j, db_order in enumerate(db_orders):
+            db_orders[j]['item_ids'] = orders[-(i+1)]['item_ids']
+    
+    junction_data = []
+    for order in db_orders:
+        ord_id = order['order_id']
+        item_order_ids = order['item_ids']
+        for item_num in item_order_ids:
+            junction_data.append((ord_id, item_num))
+                
+    return junction_data
+
+def lambda_handler(event, context):
+    try:
+        cursor = connection.cursor()
+
+        create_orders = '''
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id INTEGER IDENTITY(1,1) PRIMARY KEY,
+            order_location VARCHAR(255) NOT NULL,
+            order_total FLOAT NOT NULL,
+            order_payment_method VARCHAR(255) NOT NULL,
+            order_date_time VARCHAR(255) NOT NULL
+        )
+        '''
+        
+        create_items = '''
+        CREATE TABLE IF NOT EXISTS items (
+            item_id INTEGER IDENTITY(1,1) PRIMARY KEY,
+            item_name VARCHAR(255) NOT NULL,
+            item_price FLOAT NOT NULL
+        )
+        '''
+        
+        create_junction = '''
+        CREATE TABLE IF NOT EXISTS order_item_junction (
+            order_id INT,
+            item_id INT,
+            PRIMARY KEY (order_id, item_id)
+        )
+        '''
+        cursor.execute(create_orders)
+        cursor.execute(create_items)
+        cursor.execute(create_junction)
+        
+        connection.commit()
+        
+        # Iterate over each SQS message
+        for record in event['Records']:
+            # Extract the S3 event notification from the SQS message
+            sqs_body = json.loads(record['body'])
+            logger.info(f"SQS body: {sqs_body}")
+            
+            
+            # Handling different SQS message structures
+            if 'Message' in sqs_body:
+                s3_event = json.loads(sqs_body['Message'])['Records'][0]['s3']
+            elif 'Records' in sqs_body:
+                s3_event = sqs_body['Records'][0]['s3']
+            else:
+                logger.error("Unexpected SQS message structure")
+                raise KeyError("Unexpected SQS message structure")
+                
+            logger.info(f"S3 EVENT: {s3_event} .-->>> LINE 185")
+
+            #bucket = s3_event['bucket']['name']
+            filename = s3_event['object']['key']
+            
+            logger.info(f"FILE NAME: {filename} .-->>> LINE 190") #This appears to return the correct file name - Nick
+            
+            client = boto3.client('s3')
+            response = client.get_object(Bucket=bucket_name, Key=filename)
+            
+            logger.info(f"RESPONSE: {response} .-->>> LINE 195") # <<<<< REMOVE THIS LOGGER ONCE WORKING - Nick
+            
+            csv_content = response['Body'].read().decode('utf-8').splitlines()
+            
+            logger.info(f"CSV_CONTENT.-->>> LINE 199") # <<<<< REMOVE THIS LOGGER ONCE WORKING - Nick #logger.info(f"CSV_CONTENT: {csv_content} .-->>> LINE 199") # <<<<< REMOVE THIS LOGGER ONCE WORKING - Nick
+            
+            raw_data = extract_data(csv_content)
+            
+            
+            logger.info(f'raw data: {raw_data}')
+            print(raw_data)
+            
+            exit()
+            
+            logger.info(f"RAW_DATA: .-->>> LINE 210") # <<<<< REMOVE THIS LOGGER ONCE WORKING - Nick
+            
+            orders, new_items = transform_data(raw_data)
+            
+            logger.info(f"orders, products: {orders, products} .-->>> LINE 207") # <<<<< REMOVE THIS LOGGER ONCE WORKING - Nick
+            logger.info(f"orders: {orders} .-->>> LINE 208") # <<<<< REMOVE THIS LOGGER ONCE WORKING - Nick
+            logger.info(f"Products: {products} .-->>> LINE 209") # <<<<< REMOVE THIS LOGGER ONCE WORKING - Nick
+            
+            order_fill = '''
+            INSERT INTO orders (order_location, order_total, order_payment_method, order_date_time)
+            VALUES (%s, %s, %s, %s)
+            '''
+            
+            logger.info(f"ORDER FILL: {order_fill} .-->>> LINE 21") # <<<<< REMOVE THIS LOGGER ONCE WORKING - Nick
+            
+            for order in orders:
+                order_data = (order['location'], order['order_total'], order['payment_method'], order['date_time'])
+                cursor.execute(order_fill, order_data)
+
+            item_fill = '''
+            INSERT INTO items (item_name, item_price)
+            VALUES (%s, %s)
+            '''
+            for item in new_items:
+                item_data = (item['item_name'], item['item_price'])
+                cursor.execute(item_fill, item_data)
+            
+            recent_order_length = len(orders)
+            
+            junction_data = create_junction(orders, recent_order_length)
+            
+            junction_fill = '''
+            INSERT INTO order_item_junction (order_id, item_id)
+            VALUES (%s, %s)
+            '''
+            for junc in junction_data:
+                cursor.execute(junction_fill, junc)
+
+        connection.commit()
+        cursor.close()
+        connection.close()
+        
+        logger.info("Data inserted successfully into Redshift")
+
+        return {
+            'statusCode': 200,
+            'body': {
+                'orders': orders,
+                'products': products,
+                'junction_data': junction_data
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error in lambda_handler: {str(e)}")
+        raise e
